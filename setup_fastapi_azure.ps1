@@ -7,9 +7,46 @@
 
 # Required parameters
 param(
-    [string]$GitHubUsername = "Studio13-NYC",
-    [string]$AzureAppName = "test-data-api"
+    [string]$GitHubUsername = "Studio13-NYC"
 )
+
+function Get-UserParameters {
+    Write-Host "`nPlease provide Azure configuration details:"
+    Write-Host "----------------------------------------"
+    
+    $script:ResourceGroup = Read-Host "Resource Group name (default: myResourceGroup)"
+    if ([string]::IsNullOrWhiteSpace($script:ResourceGroup)) {
+        $script:ResourceGroup = "myResourceGroup"
+    }
+    
+    $script:Location = Read-Host "Azure Region (default: eastus)"
+    if ([string]::IsNullOrWhiteSpace($script:Location)) {
+        $script:Location = "eastus"
+    }
+    
+    $script:AppServicePlan = Read-Host "App Service Plan name (default: myAppServicePlan)"
+    if ([string]::IsNullOrWhiteSpace($script:AppServicePlan)) {
+        $script:AppServicePlan = "myAppServicePlan"
+    }
+    
+    $script:AzureAppName = Read-Host "Web App name (must be globally unique)"
+    while ([string]::IsNullOrWhiteSpace($script:AzureAppName)) {
+        Write-Host "Web App name is required and must be globally unique"
+        $script:AzureAppName = Read-Host "Web App name"
+    }
+
+    # Confirm parameters
+    Write-Host "`nConfirm Azure configuration:"
+    Write-Host "Resource Group: $script:ResourceGroup"
+    Write-Host "Location: $script:Location"
+    Write-Host "App Service Plan: $script:AppServicePlan"
+    Write-Host "Web App Name: $script:AzureAppName"
+    
+    $confirm = Read-Host "`nProceed with these settings? (Y/N)"
+    if ($confirm -ne "Y") {
+        exit 0
+    }
+}
 
 function Check-Prerequisites {
     Write-Host "Checking prerequisites..."
@@ -418,7 +455,10 @@ if ($continue -ne "Y") {
     exit 0
 }
 
-# Execute setup steps
+# Get Azure parameters first
+Get-UserParameters
+
+# Then continue with the rest of the setup
 Check-Prerequisites
 Setup-GitHubRepo -RepoName $currentFolder
 Create-FastAPIApp
@@ -427,8 +467,8 @@ Create-AzureConfig
 Create-GitignoreFile
 Setup-VirtualEnv
 Create-GitHubWorkflow
-Setup-AzureResources
-Setup-GitHubSecrets
+Setup-AzureResources -ResourceGroup $script:ResourceGroup -Location $script:Location -AppServicePlan $script:AppServicePlan
+Setup-GitHubSecrets -ResourceGroup $script:ResourceGroup
 Commit-AndPush
 
 Write-Host "`nSetup completed successfully!"
