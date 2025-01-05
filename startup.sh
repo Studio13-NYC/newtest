@@ -4,9 +4,13 @@ set -e
 echo "Starting FastAPI application..."
 cd /home/site/wwwroot
 
+# Use the Python version specified by Azure
+PYTHON_VERSION=$(ls /usr/local/python/*)
+PYTHON_PATH=$PYTHON_VERSION/bin/python3
+
 if [ ! -d "antenv" ]; then
     echo "Creating virtual environment..."
-    python -m venv antenv
+    $PYTHON_PATH -m venv antenv
 fi
 
 echo "Activating virtual environment..."
