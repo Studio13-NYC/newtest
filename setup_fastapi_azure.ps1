@@ -90,40 +90,19 @@ function Setup-GitHubRepo {
     
     Write-Host "Setting up GitHub repository..."
     
-    # Check if .git already exists
-    if (Test-Path ".git") {
-        Write-Host "Git repository already initialized."
-        # Ensure we're on main branch even for existing repos
-        git branch -M main
-        return
-    }
-
-    # Initialize git
-    git init
-
-    # Create GitHub repository if it doesn't exist
-    $repoUrl = "https://github.com/$GitHubUsername/$RepoName.git"
-    $repoExists = git ls-remote $repoUrl 2>&1
+    # Create GitHub repository first
+    Write-Host "Creating new GitHub repository: $RepoName"
+    gh repo create "$GitHubUsername/$RepoName" --public --yes
     
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Creating new GitHub repository: $RepoName"
-        gh repo create "$GitHubUsername/$RepoName" --public --confirm
+    # Then initialize git if needed
+    if (-not (Test-Path ".git")) {
+        git init
+        git branch -M main
     }
-    else {
-        Write-Host "Repository already exists on GitHub"
-    }
-
-    # Rename the default branch to main
-    git branch -M main
-
-    # Add remote (remove duplicate)
-    git remote add origin $repoUrl
-
-    # Add error handling
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to configure GitHub repository"
-        exit 1
-    }
+    
+    # Set the remote
+    git remote remove origin 2>$null
+    git remote add origin "https://github.com/$GitHubUsername/$RepoName.git"
 }
 
 function Create-FastAPIApp {
@@ -397,27 +376,66 @@ function Setup-AzureResources {
     
     Write-Host "Setting up Azure resources..."
     
-    # Check if logged in to Azure
     try {
+        # Check if logged in to Azure
         $account = az account show | ConvertFrom-Json
         Write-Host "Using Azure account: $($account.name)"
     }
     catch {
         Write-Host "Please login to Azure..."
-        az login
+        if ((az login) -eq $null) {
+            Write-Error "Azure login failed"
+            exit 1
+        }
     }
     
-    # Create resource group
-    Write-Host "Creating resource group: $ResourceGroup"
-    az group create --name $ResourceGroup --location $Location
+    # Create resource group with error handling
+    try {
+        Write-Host "Creating resource group: $ResourceGroup"
+        $rgResult = az group create --name $ResourceGroup --location $Location
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create resource group"
+        }
+    }
+    catch {
+        Write-Error "Failed to create Azure Resource Group: $_"
+        Cleanup-Resources -ResourceGroup $ResourceGroup -RepoName $currentFolder
+        exit 1
+    }
     
-    # Create App Service plan
-    Write-Host "Creating App Service plan: $AppServicePlan"
-    az appservice plan create --name $AppServicePlan --resource-group $ResourceGroup --sku B1 --is-linux
+    # Create App Service plan with error handling
+    try {
+        Write-Host "Creating App Service plan: $AppServicePlan"
+        $planResult = az appservice plan create --name $AppServicePlan --resource-group $ResourceGroup --sku B1 --is-linux
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create App Service Plan"
+        }
+    }
+    catch {
+        Write-Error "Failed to create App Service Plan: $_"
+        Cleanup-Resources -ResourceGroup $ResourceGroup -RepoName $currentFolder
+        exit 1
+    }
     
-    # Create web app
-    Write-Host "Creating web app: $AzureAppName"
-    az webapp create --name $AzureAppName --resource-group $ResourceGroup --plan $AppServicePlan --runtime "PYTHON|3.11"
+    # Create web app with error handling and validation
+    try {
+        Write-Host "Creating web app: $AzureAppName"
+        $webappResult = az webapp create --name $AzureAppName --resource-group $ResourceGroup --plan $AppServicePlan --runtime "PYTHON:3.11"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create Web App"
+        }
+        
+        # Verify webapp creation
+        $webapp = az webapp show --name $AzureAppName --resource-group $ResourceGroup
+        if ($null -eq $webapp) {
+            throw "Web App creation verification failed"
+        }
+    }
+    catch {
+        Write-Error "Failed to create or verify Web App: $_"
+        Cleanup-Resources -ResourceGroup $ResourceGroup -RepoName $currentFolder
+        exit 1
+    }
 }
 
 function Setup-GitHubSecrets {
@@ -427,53 +445,135 @@ function Setup-GitHubSecrets {
     
     Write-Host "Setting up GitHub Secrets..."
     
-    # Get publish profile
-    $publishProfile = az webapp deployment list-publishing-profiles `
-        --name $AzureAppName `
-        --resource-group $ResourceGroup `
-        --xml
+    # Wait for webapp to be ready
+    Write-Host "Waiting for web app to be ready..."
+    Start-Sleep -Seconds 30
     
-    # Set GitHub secret using gh cli
+    # Get publish profile with retry
+    $maxRetries = 3
+    $retryCount = 0
+    $success = $false
+    
+    while (-not $success -and $retryCount -lt $maxRetries) {
+        try {
+            $publishProfile = az webapp deployment list-publishing-profiles `
+                --name $AzureAppName `
+                --resource-group $ResourceGroup `
+                --xml
+            $success = $true
+        }
+        catch {
+            $retryCount++
+            if ($retryCount -lt $maxRetries) {
+                Write-Host "Retrying to get publish profile... Attempt $retryCount of $maxRetries"
+                Start-Sleep -Seconds 10
+            }
+        }
+    }
+    
+    if (-not $success) {
+        Write-Error "Failed to get publish profile after $maxRetries attempts"
+        exit 1
+    }
+    
+    # Set GitHub secret
     Write-Host "Adding publish profile to GitHub Secrets..."
     $publishProfile | gh secret set AZURE_WEBAPP_PUBLISH_PROFILE
+}
+
+function Verify-GitHubAuth {
+    Write-Host "Verifying GitHub CLI authentication..."
+    try {
+        $auth = gh auth status 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Please login to GitHub CLI..."
+            gh auth login
+        }
+    }
+    catch {
+        Write-Error "GitHub CLI not installed or not accessible"
+        exit 1
+    }
+}
+
+function Cleanup-Resources {
+    param (
+        [string]$ResourceGroup,
+        [string]$RepoName
+    )
+    
+    Write-Host "`nCleaning up resources due to error..."
+    
+    # Delete Azure resources
+    try {
+        Write-Host "Removing Azure Resource Group: $ResourceGroup"
+        az group delete --name $ResourceGroup --yes --no-wait
+    }
+    catch {
+        Write-Warning "Failed to delete Azure Resource Group: $_"
+    }
+    
+    # Delete GitHub repository
+    try {
+        Write-Host "Removing GitHub repository: $RepoName"
+        gh repo delete "$GitHubUsername/$RepoName" --yes
+    }
+    catch {
+        Write-Warning "Failed to delete GitHub repository: $_"
+    }
+    
+    # Remove local git repository
+    try {
+        Write-Host "Cleaning up local git repository..."
+        Remove-Item -Path ".git" -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Warning "Failed to clean up local git repository: $_"
+    }
 }
 
 # Main execution
 $ErrorActionPreference = "Stop"
 $currentFolder = Split-Path -Leaf (Get-Location)
 
-Write-Host "Starting comprehensive setup for: $currentFolder"
-Write-Host "This script will:"
-Write-Host "1. Check prerequisites"
-Write-Host "2. Setup GitHub repository"
-Write-Host "3. Create FastAPI application"
-Write-Host "4. Configure Azure deployment"
-Write-Host "5. Push to GitHub"
+# Add verification steps at the start
+Verify-GitHubAuth
 
-$continue = Read-Host "Continue? (Y/N)"
-if ($continue -ne "Y") {
-    exit 0
+try {
+    Write-Host "Starting comprehensive setup for: $currentFolder"
+    Write-Host "This script will:"
+    Write-Host "1. Check prerequisites"
+    Write-Host "2. Setup GitHub repository"
+    Write-Host "3. Create FastAPI application"
+    Write-Host "4. Configure Azure deployment"
+    Write-Host "5. Push to GitHub"
+
+    $continue = Read-Host "Continue? (Y/N)"
+    if ($continue -ne "Y") {
+        exit 0
+    }
+
+    # Get Azure parameters first
+    Get-UserParameters
+
+    # Execute setup steps with error handling
+    Check-Prerequisites
+    Setup-GitHubRepo -RepoName $currentFolder
+    Create-FastAPIApp
+    Create-RequirementsFile
+    Create-AzureConfig
+    Create-GitignoreFile
+    Setup-VirtualEnv
+    Create-GitHubWorkflow
+    Setup-AzureResources -ResourceGroup $script:ResourceGroup -Location $script:Location -AppServicePlan $script:AppServicePlan
+    Setup-GitHubSecrets -ResourceGroup $script:ResourceGroup
+    Commit-AndPush
+
+    Write-Host "`nSetup completed successfully!"
+    Write-Host "Your application will be available at: https://$AzureAppName.azurewebsites.net"
 }
-
-# Get Azure parameters first
-Get-UserParameters
-
-# Then continue with the rest of the setup
-Check-Prerequisites
-Setup-GitHubRepo -RepoName $currentFolder
-Create-FastAPIApp
-Create-RequirementsFile
-Create-AzureConfig
-Create-GitignoreFile
-Setup-VirtualEnv
-Create-GitHubWorkflow
-Setup-AzureResources -ResourceGroup $script:ResourceGroup -Location $script:Location -AppServicePlan $script:AppServicePlan
-Setup-GitHubSecrets -ResourceGroup $script:ResourceGroup
-Commit-AndPush
-
-Write-Host "`nSetup completed successfully!"
-Write-Host "Next steps:"
-Write-Host "1. Configure GitHub Actions in the repository"
-Write-Host "2. Set up Azure App Service"
-Write-Host "3. Add the publish profile to GitHub Secrets"
-Write-Host "4. Test the deployment at: https://$AzureAppName.azurewebsites.net" 
+catch {
+    Write-Error "Setup failed: $_"
+    Cleanup-Resources -ResourceGroup $script:ResourceGroup -RepoName $currentFolder
+    exit 1
+} 
