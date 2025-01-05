@@ -92,7 +92,7 @@ function Setup-GitHubRepo {
     
     # Create GitHub repository first
     Write-Host "Creating new GitHub repository: $RepoName"
-    gh repo create "$GitHubUsername/$RepoName" --public --yes
+    gh repo create "$GitHubUsername/$RepoName" --public --confirm
     
     # Then initialize git if needed
     if (-not (Test-Path ".git")) {
@@ -103,6 +103,18 @@ function Setup-GitHubRepo {
     # Set the remote
     git remote remove origin 2>$null
     git remote add origin "https://github.com/$GitHubUsername/$RepoName.git"
+
+    # Verify repository was created and remote is set correctly
+    try {
+        $repoCheck = gh repo view "$GitHubUsername/$RepoName" --json url 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to verify repository creation"
+        }
+    }
+    catch {
+        Write-Error "Failed to create or verify GitHub repository: $_"
+        exit 1
+    }
 }
 
 function Create-FastAPIApp {
