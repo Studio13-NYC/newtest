@@ -18,4 +18,4 @@ pip install -r requirements.txt
 
 echo "Starting Gunicorn with FastAPI..."
 export PYTHONPATH=/home/site/wwwroot
-gunicorn --bind=0.0.0.0:8000 --timeout 600 --workers 4 --worker-class uvicorn.workers.UvicornWorker wsgi:application
+gunicorn wsgi:application --bind=0.0.0.0:8000 --timeout 600 --workers 4 --access-logfile - --error-logfile - --log-level debug
