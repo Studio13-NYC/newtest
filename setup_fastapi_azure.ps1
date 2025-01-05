@@ -308,6 +308,99 @@ function Commit-AndPush {
     }
 }
 
+function Create-GitHubWorkflow {
+    Write-Host "Creating GitHub Actions workflow..."
+    
+    # Create .github/workflows directory if it doesn't exist
+    $workflowPath = ".github/workflows"
+    if (-not (Test-Path $workflowPath)) {
+        New-Item -ItemType Directory -Path $workflowPath -Force | Out-Null
+    }
+
+    # Create azure-deploy.yml
+    $workflowContent = @"
+name: Deploy to Azure
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Deploy to Azure Web App
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: '$AzureAppName'
+        publish-profile: `${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+"@
+    
+    $workflowContent | Out-File -FilePath "$workflowPath/azure-deploy.yml" -Encoding UTF8
+}
+
+function Setup-AzureResources {
+    param (
+        [string]$ResourceGroup = "myResourceGroup",
+        [string]$Location = "eastus",
+        [string]$AppServicePlan = "myAppServicePlan"
+    )
+    
+    Write-Host "Setting up Azure resources..."
+    
+    # Check if logged in to Azure
+    try {
+        $account = az account show | ConvertFrom-Json
+        Write-Host "Using Azure account: $($account.name)"
+    }
+    catch {
+        Write-Host "Please login to Azure..."
+        az login
+    }
+    
+    # Create resource group
+    Write-Host "Creating resource group: $ResourceGroup"
+    az group create --name $ResourceGroup --location $Location
+    
+    # Create App Service plan
+    Write-Host "Creating App Service plan: $AppServicePlan"
+    az appservice plan create --name $AppServicePlan --resource-group $ResourceGroup --sku B1 --is-linux
+    
+    # Create web app
+    Write-Host "Creating web app: $AzureAppName"
+    az webapp create --name $AzureAppName --resource-group $ResourceGroup --plan $AppServicePlan --runtime "PYTHON|3.11"
+}
+
+function Setup-GitHubSecrets {
+    param (
+        [string]$ResourceGroup = "myResourceGroup"
+    )
+    
+    Write-Host "Setting up GitHub Secrets..."
+    
+    # Get publish profile
+    $publishProfile = az webapp deployment list-publishing-profiles `
+        --name $AzureAppName `
+        --resource-group $ResourceGroup `
+        --xml
+    
+    # Set GitHub secret using gh cli
+    Write-Host "Adding publish profile to GitHub Secrets..."
+    $publishProfile | gh secret set AZURE_WEBAPP_PUBLISH_PROFILE
+}
+
 # Main execution
 $ErrorActionPreference = "Stop"
 $currentFolder = Split-Path -Leaf (Get-Location)
@@ -333,6 +426,9 @@ Create-RequirementsFile
 Create-AzureConfig
 Create-GitignoreFile
 Setup-VirtualEnv
+Create-GitHubWorkflow
+Setup-AzureResources
+Setup-GitHubSecrets
 Commit-AndPush
 
 Write-Host "`nSetup completed successfully!"
