@@ -1,9 +1,8 @@
 #!/bin/bash
 set -e
 
-echo "Current directory: \D:\Studio13\S13AutonomousFab\newtest"
-echo "Listing directory contents:"
-ls -la
+echo "Starting FastAPI application..."
+cd /home/site/wwwroot
 
 if [ ! -d "antenv" ]; then
     echo "Creating virtual environment..."
@@ -17,7 +16,6 @@ echo "Installing dependencies..."
 pip install --upgrade pip
 pip install -r requirements.txt
 
-echo "Starting FastAPI application..."
-cd /home/site/wwwroot
+echo "Starting Gunicorn with FastAPI..."
 export PYTHONPATH=/home/site/wwwroot
-gunicorn --bind=0.0.0.0:8000 --timeout 600 --workers 4 --access-logfile - --error-logfile - --log-level debug wsgi:application
+gunicorn --bind=0.0.0.0:8000 --timeout 600 --workers 4 --worker-class uvicorn.workers.UvicornWorker wsgi:application
